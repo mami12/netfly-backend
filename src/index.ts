@@ -33,7 +33,7 @@ app.use('/api/manager', auth, managerRoutes);
 app.use('/api', sportsRoutes); // sports, matches, booking (publicly viewable)
 app.use('/api/bets', betsRoutes);
 
-import { ExternalFeedAdapter } from './feeds/ExternalFeedAdapter';
+import { externalFeedInstance } from './feeds/ExternalFeedAdapter';
 
 const feed = new SimulationFeed();
 
@@ -49,12 +49,11 @@ feed.onPitchUpdate((state) => {
 
 feed.start();
 
-if (process.env.SPORTS_API_KEY || process.env.THE_ODDS_API_KEY) {
-  const externalFeed = new ExternalFeedAdapter();
-  externalFeed.onOddsUpdate((delta) => {
+if (process.env.BZZOIRO_API_KEY || process.env.SPORTS_API_KEY || process.env.THE_ODDS_API_KEY) {
+  externalFeedInstance.onOddsUpdate((delta) => {
     wsService.broadcast('odds', delta);
   });
-  externalFeed.start();
+  externalFeedInstance.start();
 }
 
 server.listen(PORT, () => {

@@ -52,14 +52,14 @@ export class SimulationFeed implements IFeedProvider {
     const now = new Date();
     
     // Ensure we always have upcoming matches - create new ones if pool is low
-    const prematchCount = await prisma.match.count({ where: { status: 'PREMATCH' } });
+    const prematchCount = await prisma.match.count({ where: { status: 'PREMATCH', isSimulated: true } });
     if (prematchCount < 5) {
       await this.createNewMatches(10);
     }
     
     // Start matches
     const prematchMatches = await prisma.match.findMany({
-      where: { status: 'PREMATCH', startTime: { lte: now } }
+      where: { status: 'PREMATCH', startTime: { lte: now }, isSimulated: true }
     });
 
     for (const match of prematchMatches) {
@@ -70,7 +70,7 @@ export class SimulationFeed implements IFeedProvider {
 
     // Process live matches
     const liveMatches = await prisma.match.findMany({
-      where: { status: 'LIVE' },
+      where: { status: 'LIVE', isSimulated: true },
       include: { markets: { include: { outcomes: true } } }
     });
 
@@ -89,7 +89,7 @@ export class SimulationFeed implements IFeedProvider {
         this.pitchStates.delete(match.id);
 
         // Auto-promote a prematch match to LIVE to keep action flowing!
-        const nextPrematch = await prisma.match.findFirst({ where: { status: 'PREMATCH' } });
+        const nextPrematch = await prisma.match.findFirst({ where: { status: 'PREMATCH', isSimulated: true } });
         if (nextPrematch) {
           await prisma.match.update({
             where: { id: nextPrematch.id },

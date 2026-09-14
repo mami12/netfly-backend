@@ -47,6 +47,7 @@ router.get('/matches', async (req, res) => {
       }
     },
     orderBy: [
+      { isSimulated: 'asc' },
       { status: 'asc' }, // LIVE first
       { startTime: 'asc' }
     ]
