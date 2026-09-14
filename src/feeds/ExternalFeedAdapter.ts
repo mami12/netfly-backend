@@ -74,6 +74,7 @@ export class ExternalFeedAdapter implements IFeedProvider {
   private lastLeaguesSync = 0;
   private leagueProbeCount = 0;
   private oddsProbeCount = 0;
+  private lastOddsDiagnostics: any = null;
 
   private matchEventCallbacks: ((event: MatchEvent) => void)[] = [];
   private pitchUpdateCallbacks: ((state: PitchState) => void)[] = [];
@@ -89,6 +90,7 @@ export class ExternalFeedAdapter implements IFeedProvider {
   getLastSyncTime(): string | null { return this.lastSyncTime ? this.lastSyncTime.toISOString() : null; }
   getLastError(): string | null { return this.lastError; }
   getImportedCount(): number { return this.importedCount; }
+  getOddsDiagnostics(): any { return this.lastOddsDiagnostics; }
 
   onMatchEvent(callback: (event: MatchEvent) => void) { this.matchEventCallbacks.push(callback); }
   onPitchUpdate(callback: (state: PitchState) => void) { this.pitchUpdateCallbacks.push(callback); }
@@ -223,12 +225,42 @@ async syncRealMatches(): Promise<{ success: boolean; count: number; message: str
       }
       console.log(`[ExternalFeedAdapter] Odds items fetched: ${allOddsItems.length}`);
 
+      // Safety net: if the best-price feed yields nothing (parameter rejected,
+      // rate limited, or empty window) fall back to the plain full odds feed.
+      let usedFallback = false;
+      if (allOddsItems.length === 0) {
+        usedFallback = true;
+        console.warn('[ExternalFeedAdapter] Best-price odds empty; falling back to full odds feed.');
+        const fallbackResponses = await Promise.all(
+          oddsMarkets.map((market) => this.request(`/api/v2/odds/?limit=200&market=${market}`))
+        );
+        fallbackResponses.forEach((res, idx) => {
+          const items = this.extractList(res.data);
+          if (res.status === 200 && items.length > 0) {
+            allOddsItems.push(...items);
+          } else {
+            oddsIssues.push(`fallback:${oddsMarkets[idx]} status=${res.status} items=${items.length} sample=${res.raw.substring(0, 120)}`);
+          }
+        });
+        console.log(`[ExternalFeedAdapter] Fallback odds items: ${allOddsItems.length}`);
+      }
+
       const oddsEventIds = new Set<number>();
       for (const item of allOddsItems) {
         const evId = Number(item.event_id ?? item.event);
         if (evId) oddsEventIds.add(evId);
       }
       const oddsCoveredEvents = [...oddsEventIds].filter((id) => eventToMatch.has(id)).length;
+
+      this.lastOddsDiagnostics = {
+        usedFallback,
+        requests: oddsResponses.length,
+        itemsFetched: allOddsItems.length,
+        coveredEvents: oddsCoveredEvents,
+        linkedEvents: eventToMatch.size,
+        statuses: oddsResponses.map((r, i) => `${oddsMarkets[i % oddsMarkets.length]}@${oddsOffsets[Math.floor(i / oddsMarkets.length)]}=${r.status}`),
+        issues: oddsIssues.slice(0, 5)
+      };
 
       const oddsApplied = await this.applyOdds(allOddsItems, eventToMatch);
 

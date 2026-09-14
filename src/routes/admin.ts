@@ -547,7 +547,8 @@ router.get('/feed-status', async (req, res) => {
     lastSyncTime: externalFeedInstance.getLastSyncTime(),
     lastSyncError: externalFeedInstance.getLastError(),
     realMatchesCount: realCount,
-    simulatedMatchesCount: simCount
+    simulatedMatchesCount: simCount,
+    oddsDiagnostics: externalFeedInstance.getOddsDiagnostics()
   });
 });
 
