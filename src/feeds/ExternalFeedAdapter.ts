@@ -236,10 +236,12 @@ async syncRealMatches(): Promise<{ success: boolean; count: number; message: str
       for (const ev of priorityQueue) {
         const id = Number(ev.id);
         if (eventToMatch.has(id) && !priorityIds.includes(id)) priorityIds.push(id);
-        if (priorityIds.length >= MAX_EVENT_ODDS) break;
       }
-
-      const perEventIds = priorityIds.slice(0, MAX_EVENT_ODDS);
+      // Every live event gets odds (a small set), while upcoming-fixture odds are
+      // capped by ODDS_EVENT_LIMIT so each sync stays inside the API request budget.
+      const liveIds = liveEvents.map((ev) => Number(ev.id)).filter((id) => eventToMatch.has(id));
+      const fixtureIds = priorityIds.filter((id) => !liveIds.includes(id)).slice(0, MAX_EVENT_ODDS);
+      const perEventIds = [...new Set([...liveIds, ...fixtureIds])];
       const perEventStatuses: string[] = [];
       let perEventItems = 0;
       let rateLimited = 0;
@@ -282,7 +284,7 @@ async syncRealMatches(): Promise<{ success: boolean; count: number; message: str
         itemsFetched: allOddsItems.length,
         coveredEvents: oddsCoveredEvents,
         linkedEvents: eventToMatch.size,
-        feedStatuses: oddsResponses.map((r, i) => `${oddsMarkets[i]}=${r.status}`),
+        feedStatuses: oddsResponses.map((r, i) => `${oddsMarkets[i % oddsMarkets.length]}=${r.status}`),
         perEventStatuses: perEventStatuses.slice(0, 6),
         issues: oddsIssues.slice(0, 6)
       };
