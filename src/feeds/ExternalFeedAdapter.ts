@@ -6,6 +6,7 @@ const prisma = new PrismaClient();
 
 const BZZ_API_BASE = process.env.BZZOIRO_API_BASE || 'https://sports.bzzoiro.com';
 const FIXTURE_WINDOW_MS = 72 * 60 * 60 * 1000; // look ahead for upcoming fixtures (72h)
+const MAX_EVENT_ODDS = 24; // per-event odds lookups per sync (live first, then soonest)
 
 function fetchJson(url: string, headers: Record<string, string> = {}): Promise<{ status: number; data: any; raw: string }> {
   return new Promise((resolve) => {
@@ -161,20 +162,15 @@ async syncRealMatches(): Promise<{ success: boolean; count: number; message: str
       const from = new Date().toISOString().slice(0, 10);
       const to = new Date(Date.now() + FIXTURE_WINDOW_MS).toISOString().slice(0, 10);
 
-      // Odds feed: `is_max_quote=true` returns ONE best price per
-      // (event, market, outcome) instead of every bookmaker's quote (~14x fewer
-      // rows), so a 200-row page covers 60+ events instead of ~6. Two pages per
-      // market widen the window so nearly every imported fixture receives odds.
+      // Baseline odds: the global feed. On the free plan every row is a single
+      // bookmaker quote (~100 rows per event), so one page per market only covers
+      // a couple of events. `is_max_quote=true` would collapse that to one best
+      // price per outcome but requires the paid "Football Unlimited" plan (403).
+      // Per-event queries (below) widen coverage for the visible fixtures instead.
       const oddsMarkets = ['1x2', 'over_under_25', 'btts', 'double_chance'];
-      const oddsOffsets = [0, 200];
-      const oddsRequests: Promise<{ status: number; data: any; raw: string }>[] = [];
-      for (const offset of oddsOffsets) {
-        for (const market of oddsMarkets) {
-          oddsRequests.push(
-            this.request(`/api/v2/odds/?limit=200&offset=${offset}&market=${market}&is_max_quote=true`)
-          );
-        }
-      }
+      const oddsRequests = oddsMarkets.map(
+        (market) => this.request(`/api/v2/odds/?limit=200&market=${market}`)
+      );
 
       const [liveRes, fixturesRes, ...oddsResponses] = await Promise.all([
         this.request('/api/v2/events/live/'),
@@ -210,39 +206,45 @@ async syncRealMatches(): Promise<{ success: boolean; count: number; message: str
 
       const allOddsItems: any[] = [];
       const oddsIssues: string[] = [];
-      oddsResponses.forEach((res, idx) => {
-        const market = oddsMarkets[idx % oddsMarkets.length];
-        const offset = oddsOffsets[Math.floor(idx / oddsMarkets.length)];
+      const feedCounts: number[] = [];
+      const collect = (label: string, res: { status: number; data: any; raw: string }): number => {
         const items = this.extractList(res.data);
         if (res.status === 200 && items.length > 0) {
           allOddsItems.push(...items);
-        } else {
-          oddsIssues.push(`${market}@${offset} status=${res.status} items=${items.length} sample=${res.raw.substring(0, 120)}`);
+          return items.length;
         }
-      });
-      if (oddsIssues.length > 0) {
-        console.warn(`[ExternalFeedAdapter] Odds request issues (${oddsIssues.length}/${oddsResponses.length}):`, oddsIssues.join(' || '));
-      }
-      console.log(`[ExternalFeedAdapter] Odds items fetched: ${allOddsItems.length}`);
+        oddsIssues.push(`${label} status=${res.status} items=${items.length} sample=${res.raw.substring(0, 110)}`);
+        return 0;
+      };
+      oddsResponses.forEach((res, idx) => { feedCounts.push(collect(`feed:${oddsMarkets[idx]}`, res)); });
+      console.log(`[ExternalFeedAdapter] Feed odds items: ${allOddsItems.length}`);
 
-      // Safety net: if the best-price feed yields nothing (parameter rejected,
-      // rate limited, or empty window) fall back to the plain full odds feed.
-      let usedFallback = false;
-      if (allOddsItems.length === 0) {
-        usedFallback = true;
-        console.warn('[ExternalFeedAdapter] Best-price odds empty; falling back to full odds feed.');
-        const fallbackResponses = await Promise.all(
-          oddsMarkets.map((market) => this.request(`/api/v2/odds/?limit=200&market=${market}`))
+      // Prioritise live events first, then the soonest kick-offs, and pull odds
+      // per event. Same endpoint/schema as the feed, so the mapper is unchanged.
+      const priorityQueue = [...liveEvents, ...[...fixtureEvents].sort((a, b) => new Date(a.event_date).getTime() - new Date(b.event_date).getTime())];
+      const priorityIds: number[] = [];
+      for (const ev of priorityQueue) {
+        const id = Number(ev.id);
+        if (eventToMatch.has(id) && !priorityIds.includes(id)) priorityIds.push(id);
+        if (priorityIds.length >= MAX_EVENT_ODDS) break;
+      }
+
+      const perEventIds = priorityIds.slice(0, MAX_EVENT_ODDS);
+      const perEventStatuses: string[] = [];
+      let perEventItems = 0;
+      if (perEventIds.length > 0) {
+        const perEventResponses = await Promise.all(
+          perEventIds.map((id) => this.request(`/api/v2/odds/?event_id=${id}&limit=200`))
         );
-        fallbackResponses.forEach((res, idx) => {
-          const items = this.extractList(res.data);
-          if (res.status === 200 && items.length > 0) {
-            allOddsItems.push(...items);
-          } else {
-            oddsIssues.push(`fallback:${oddsMarkets[idx]} status=${res.status} items=${items.length} sample=${res.raw.substring(0, 120)}`);
-          }
+        perEventResponses.forEach((res, idx) => {
+          perEventItems += collect(`event:${perEventIds[idx]}`, res);
+          perEventStatuses.push(`${perEventIds[idx]}=${res.status}`);
         });
-        console.log(`[ExternalFeedAdapter] Fallback odds items: ${allOddsItems.length}`);
+        console.log(`[ExternalFeedAdapter] Per-event odds items: ${perEventItems} across ${perEventIds.length} events`);
+      }
+
+      if (oddsIssues.length > 0) {
+        console.warn(`[ExternalFeedAdapter] Odds request issues (${oddsIssues.length}):`, oddsIssues.slice(0, 6).join(' || '));
       }
 
       const oddsEventIds = new Set<number>();
@@ -253,13 +255,16 @@ async syncRealMatches(): Promise<{ success: boolean; count: number; message: str
       const oddsCoveredEvents = [...oddsEventIds].filter((id) => eventToMatch.has(id)).length;
 
       this.lastOddsDiagnostics = {
-        usedFallback,
-        requests: oddsResponses.length,
+        requests: oddsResponses.length + perEventIds.length,
+        feedItems: feedCounts.reduce((a, b) => a + b, 0),
+        perEventItems,
+        perEventEvents: perEventIds.length,
         itemsFetched: allOddsItems.length,
         coveredEvents: oddsCoveredEvents,
         linkedEvents: eventToMatch.size,
-        statuses: oddsResponses.map((r, i) => `${oddsMarkets[i % oddsMarkets.length]}@${oddsOffsets[Math.floor(i / oddsMarkets.length)]}=${r.status}`),
-        issues: oddsIssues.slice(0, 5)
+        feedStatuses: oddsResponses.map((r, i) => `${oddsMarkets[i]}=${r.status}`),
+        perEventStatuses: perEventStatuses.slice(0, 6),
+        issues: oddsIssues.slice(0, 6)
       };
 
       const oddsApplied = await this.applyOdds(allOddsItems, eventToMatch);
