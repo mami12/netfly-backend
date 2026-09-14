@@ -1,0 +1,143 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String        @id @default(uuid())
+  username     String        @unique
+  passwordHash String
+  role         String        @default("PLAYER") // ADMIN, MANAGER, PLAYER
+  status       String        @default("ACTIVE") // ACTIVE, FROZEN, BANNED
+  balance      Float         @default(0)
+  currency     String        @default("LEK")
+  managerId    String?       // Referral: which manager owns this user
+  manager      User?         @relation("ManagerUsers", fields: [managerId], references: [id])
+  managedUsers User[]        @relation("ManagerUsers")
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  transactions Transaction[]
+  tickets      Ticket[]
+}
+
+model Transaction {
+  id          String   @id @default(uuid())
+  userId      String
+  amount      Float
+  type        String // DEPOSIT, WITHDRAWAL, BET_PLACED, BET_WON, BET_REFUND, TICKET_REVERT
+  referenceId String?
+  balanceAfter Float
+  description String?
+  createdAt   DateTime @default(now())
+  user        User     @relation(fields: [userId], references: [id])
+}
+
+model Sport {
+  id         Int        @id @default(autoincrement())
+  name       String
+  slug       String     @unique
+  iconName   String
+  sortOrder  Int
+  isActive   Boolean    @default(true)
+  categories Category[]
+}
+
+model Category {
+  id          Int          @id @default(autoincrement())
+  sportId     Int
+  name        String
+  slug        String
+  countryCode String?
+  sortOrder   Int
+  sport       Sport        @relation(fields: [sportId], references: [id])
+  tournaments Tournament[]
+}
+
+model Tournament {
+  id         Int      @id @default(autoincrement())
+  categoryId Int
+  name       String
+  slug       String
+  sortOrder  Int
+  category   Category @relation(fields: [categoryId], references: [id])
+  matches    Match[]
+}
+
+model Match {
+  id           String       @id @default(uuid())
+  tournamentId Int
+  homeTeam     String
+  awayTeam     String
+  startTime    DateTime
+  status       String // PREMATCH, LIVE, ENDED, CANCELLED
+  homeScore    Int          @default(0)
+  awayScore    Int          @default(0)
+  currentMinute Int         @default(0)
+  isSuspended  Boolean      @default(false)
+  isSimulated  Boolean      @default(true)
+  createdAt    DateTime     @default(now())
+  tournament   Tournament   @relation(fields: [tournamentId], references: [id])
+  markets      Market[]
+  ticketLines  TicketLine[]
+}
+
+model Market {
+  id         String       @id @default(uuid())
+  matchId    String
+  marketType String // 1X2, OVER_UNDER, BOTH_TEAMS_SCORE, DOUBLE_CHANCE
+  name       String
+  specifier  String?
+  status     String // ACTIVE, SUSPENDED, SETTLED
+  sortOrder  Int
+  match      Match        @relation(fields: [matchId], references: [id])
+  outcomes   Outcome[]
+  ticketLines TicketLine[]
+}
+
+model Outcome {
+  id         String       @id @default(uuid())
+  marketId   String
+  name       String
+  odds       Float
+  isWinner   Boolean?
+  status     String // ACTIVE, SUSPENDED, SETTLED, VOID
+  market     Market       @relation(fields: [marketId], references: [id])
+  ticketLines TicketLine[]
+}
+
+model Ticket {
+  id              String       @id @default(uuid())
+  bookingCode     String?      @unique
+  userId          String?
+  stake           Float
+  potentialPayout Float
+  totalOdds       Float
+  ticketType      String // SINGLE, COMBO, SYSTEM
+  systemType      String?
+  status          String // PENDING, WON, LOST, CANCELLED, VOID, REVERTED
+  placedAt        DateTime     @default(now())
+  settledAt       DateTime?
+  user            User?        @relation(fields: [userId], references: [id])
+  lines           TicketLine[]
+}
+
+model TicketLine {
+  id              String  @id @default(uuid())
+  ticketId        String
+  matchId         String
+  marketId        String
+  outcomeId       String
+  outcomeName     String
+  marketName      String
+  matchName       String
+  oddsAtPlacement Float
+  status          String // PENDING, WON, LOST, VOID
+  ticket          Ticket  @relation(fields: [ticketId], references: [id])
+  match           Match   @relation(fields: [matchId], references: [id])
+  market          Market  @relation(fields: [marketId], references: [id])
+  outcome         Outcome @relation(fields: [outcomeId], references: [id])
+}

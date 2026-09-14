@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: netfly-sport-backend
+    env: node
+    plan: free
+    region: frankfurt
+    buildCommand: npm install && npm run build && npm run db:seed
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: DATABASE_URL
+        value: "file:./dev.db"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGINS
+        value: "*"
