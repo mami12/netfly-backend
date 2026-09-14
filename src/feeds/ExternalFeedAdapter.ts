@@ -5,8 +5,18 @@ import https from 'https';
 const prisma = new PrismaClient();
 
 const BZZ_API_BASE = process.env.BZZOIRO_API_BASE || 'https://sports.bzzoiro.com';
+function envInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || String(raw).trim() === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : fallback;
+}
+
 const FIXTURE_WINDOW_MS = 72 * 60 * 60 * 1000; // look ahead for upcoming fixtures (72h)
-const MAX_EVENT_ODDS = 24; // per-event odds lookups per sync (live first, then soonest)
+// Per-event odds lookups per sync (live first, then soonest kick-offs).
+// Tunable via ODDS_EVENT_LIMIT on Render without touching code; lower it
+// (e.g. 24) if Bzzoiro starts answering 429.
+const MAX_EVENT_ODDS = envInt('ODDS_EVENT_LIMIT', 60);
 
 function fetchJson(url: string, headers: Record<string, string> = {}): Promise<{ status: number; data: any; raw: string }> {
   return new Promise((resolve) => {
@@ -232,15 +242,24 @@ async syncRealMatches(): Promise<{ success: boolean; count: number; message: str
       const perEventIds = priorityIds.slice(0, MAX_EVENT_ODDS);
       const perEventStatuses: string[] = [];
       let perEventItems = 0;
+      let rateLimited = 0;
       if (perEventIds.length > 0) {
-        const perEventResponses = await Promise.all(
-          perEventIds.map((id) => this.request(`/api/v2/odds/?event_id=${id}&limit=200`))
-        );
-        perEventResponses.forEach((res, idx) => {
-          perEventItems += collect(`event:${perEventIds[idx]}`, res);
-          perEventStatuses.push(`${perEventIds[idx]}=${res.status}`);
-        });
-        console.log(`[ExternalFeedAdapter] Per-event odds items: ${perEventItems} across ${perEventIds.length} events`);
+        // Chunked concurrency keeps us comfortably under the API rate limit (429).
+        const chunkSize = 12;
+        for (let i = 0; i < perEventIds.length; i += chunkSize) {
+          const chunk = perEventIds.slice(i, i + chunkSize);
+          const results = await Promise.all(
+            chunk.map((id) => this.request(`/api/v2/odds/?event_id=${id}&limit=200`))
+          );
+          results.forEach((res, j) => {
+            const id = chunk[j];
+            if (res.status === 429) rateLimited++;
+            perEventItems += collect(`event:${id}`, res);
+            if (perEventStatuses.length < 6) perEventStatuses.push(`${id}=${res.status}`);
+          });
+          if (i + chunkSize < perEventIds.length) await new Promise((r) => setTimeout(r, 250));
+        }
+        console.log(`[ExternalFeedAdapter] Per-event odds items: ${perEventItems} across ${perEventIds.length} events (${rateLimited} rate limited)`);
       }
 
       if (oddsIssues.length > 0) {
@@ -259,6 +278,7 @@ async syncRealMatches(): Promise<{ success: boolean; count: number; message: str
         feedItems: feedCounts.reduce((a, b) => a + b, 0),
         perEventItems,
         perEventEvents: perEventIds.length,
+        rateLimited,
         itemsFetched: allOddsItems.length,
         coveredEvents: oddsCoveredEvents,
         linkedEvents: eventToMatch.size,
