@@ -552,6 +552,64 @@ router.get('/feed-status', async (req, res) => {
   });
 });
 
+// Removes duplicate markets left behind by the pre-mutex race between overlapping
+// syncs. Markets/outcomes referenced by a ticket line are NEVER deleted, so bet
+// history stays intact. Pass { "dryRun": false } to actually apply the cleanup.
+router.post('/dedupe-markets', async (req, res) => {
+  const dryRun = req.body?.dryRun !== false;
+  const markets = await prisma.market.findMany({
+    include: { outcomes: { select: { id: true } }, _count: { select: { ticketLines: true } } }
+  });
+
+  const groups = new Map<string, typeof markets>();
+  for (const m of markets) {
+    const key = `${m.matchId}|${m.marketType}|${m.specifier ?? ''}`;
+    const list = groups.get(key) || [];
+    list.push(m);
+    groups.set(key, list);
+  }
+
+  const report: any[] = [];
+  let removed = 0;
+  let skipped = 0;
+
+  for (const [key, list] of groups) {
+    if (list.length < 2) continue;
+    // Keeper: a market already referenced by a ticket wins, else the richest one.
+    const sorted = [...list].sort((a, b) => {
+      const aRef = a._count.ticketLines > 0 ? 1 : 0;
+      const bRef = b._count.ticketLines > 0 ? 1 : 0;
+      if (aRef !== bRef) return bRef - aRef;
+      if (a.outcomes.length !== b.outcomes.length) return b.outcomes.length - a.outcomes.length;
+      return a.id < b.id ? -1 : 1;
+    });
+    const losers = sorted.slice(1);
+
+    for (const loser of losers) {
+      const outcomeIds = loser.outcomes.map((o) => o.id);
+      const refMarket = await prisma.ticketLine.count({ where: { marketId: loser.id } });
+      const refOutcome = outcomeIds.length
+        ? await prisma.ticketLine.count({ where: { outcomeId: { in: outcomeIds } } })
+        : 0;
+
+      if (refMarket > 0 || refOutcome > 0) {
+        skipped++;
+        report.push({ key, action: 'skipped-referenced-by-ticket', marketId: loser.id });
+        continue;
+      }
+
+      if (!dryRun) {
+        await prisma.outcome.deleteMany({ where: { marketId: loser.id } });
+        await prisma.market.delete({ where: { id: loser.id } });
+      }
+      removed++;
+      report.push({ key, action: dryRun ? 'would-delete' : 'deleted', marketId: loser.id, outcomes: outcomeIds.length });
+    }
+  }
+
+  res.json({ success: true, dryRun, removed, skipped, report: report.slice(0, 50) });
+});
+
 router.post('/sync-matches', async (req, res) => {
   const { apiKey } = req.body;
   if (apiKey) {

@@ -86,6 +86,7 @@ export class ExternalFeedAdapter implements IFeedProvider {
   private leagueProbeCount = 0;
   private oddsProbeCount = 0;
   private lastOddsDiagnostics: any = null;
+  private syncInFlight: Promise<{ success: boolean; count: number; message: string }> | null = null;
 
   private matchEventCallbacks: ((event: MatchEvent) => void)[] = [];
   private pitchUpdateCallbacks: ((state: PitchState) => void)[] = [];
@@ -160,7 +161,19 @@ export class ExternalFeedAdapter implements IFeedProvider {
       console.warn(`[ExternalFeedAdapter] Leagues fetch status=${res.status}, items=${leagues.length}; sample=${res.raw.substring(0, 160)}`);
     }
   }
-async syncRealMatches(): Promise<{ success: boolean; count: number; message: string }> {
+  // Concurrency guard: manual triggers and the interval poll used to overlap and
+  // race on market creation, inserting duplicate markets for the same selection.
+  async syncRealMatches(): Promise<{ success: boolean; count: number; message: string }> {
+    if (this.syncInFlight) {
+      console.log('[ExternalFeedAdapter] Sync already in progress; reusing the running sync.');
+      return this.syncInFlight;
+    }
+    const run = this.doSyncRealMatches().finally(() => { this.syncInFlight = null; });
+    this.syncInFlight = run;
+    return run;
+  }
+
+  private async doSyncRealMatches(): Promise<{ success: boolean; count: number; message: string }> {
     if (!this.apiKey) {
       this.lastError = 'Nuk është vendosur asnjë API Key';
       throw new Error(this.lastError);
