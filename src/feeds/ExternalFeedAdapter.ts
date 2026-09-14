@@ -159,13 +159,25 @@ async syncRealMatches(): Promise<{ success: boolean; count: number; message: str
       const from = new Date().toISOString().slice(0, 10);
       const to = new Date(Date.now() + FIXTURE_WINDOW_MS).toISOString().slice(0, 10);
 
-      const [liveRes, fixturesRes, odds1x2, oddsOU, oddsBTTS, oddsDC] = await Promise.all([
+      // Odds feed: `is_max_quote=true` returns ONE best price per
+      // (event, market, outcome) instead of every bookmaker's quote (~14x fewer
+      // rows), so a 200-row page covers 60+ events instead of ~6. Two pages per
+      // market widen the window so nearly every imported fixture receives odds.
+      const oddsMarkets = ['1x2', 'over_under_25', 'btts', 'double_chance'];
+      const oddsOffsets = [0, 200];
+      const oddsRequests: Promise<{ status: number; data: any; raw: string }>[] = [];
+      for (const offset of oddsOffsets) {
+        for (const market of oddsMarkets) {
+          oddsRequests.push(
+            this.request(`/api/v2/odds/?limit=200&offset=${offset}&market=${market}&is_max_quote=true`)
+          );
+        }
+      }
+
+      const [liveRes, fixturesRes, ...oddsResponses] = await Promise.all([
         this.request('/api/v2/events/live/'),
         this.request(`/api/v2/events/?date_from=${from}&date_to=${to}&limit=200`),
-        this.request('/api/v2/odds/?limit=200&market=1x2'),
-        this.request('/api/v2/odds/?limit=200&market=over_under_25'),
-        this.request('/api/v2/odds/?limit=200&market=btts'),
-        this.request('/api/v2/odds/?limit=200&market=double_chance')
+        ...oddsRequests
       ]);
 
       if (liveRes.status === 401 || liveRes.status === 403 || fixturesRes.status === 401 || fixturesRes.status === 403) {
@@ -194,20 +206,30 @@ async syncRealMatches(): Promise<{ success: boolean; count: number; message: str
         }
       }
 
-      const allOddsItems = [
-        ...this.extractList(odds1x2.data),
-        ...this.extractList(oddsOU.data),
-        ...this.extractList(oddsBTTS.data),
-        ...this.extractList(oddsDC.data)
-      ];
-      if (allOddsItems.length === 0) {
-        console.warn('[ExternalFeedAdapter] No odds items parsed. sample responses =>', {
-          '1x2': odds1x2.raw.substring(0, 220),
-        OU25: oddsOU.raw.substring(0, 140)
-        });
-      } else {
-        console.log(`[ExternalFeedAdapter] Odds items parsed: ${allOddsItems.length}`);
+      const allOddsItems: any[] = [];
+      const oddsIssues: string[] = [];
+      oddsResponses.forEach((res, idx) => {
+        const market = oddsMarkets[idx % oddsMarkets.length];
+        const offset = oddsOffsets[Math.floor(idx / oddsMarkets.length)];
+        const items = this.extractList(res.data);
+        if (res.status === 200 && items.length > 0) {
+          allOddsItems.push(...items);
+        } else {
+          oddsIssues.push(`${market}@${offset} status=${res.status} items=${items.length} sample=${res.raw.substring(0, 120)}`);
+        }
+      });
+      if (oddsIssues.length > 0) {
+        console.warn(`[ExternalFeedAdapter] Odds request issues (${oddsIssues.length}/${oddsResponses.length}):`, oddsIssues.join(' || '));
       }
+      console.log(`[ExternalFeedAdapter] Odds items fetched: ${allOddsItems.length}`);
+
+      const oddsEventIds = new Set<number>();
+      for (const item of allOddsItems) {
+        const evId = Number(item.event_id ?? item.event);
+        if (evId) oddsEventIds.add(evId);
+      }
+      const oddsCoveredEvents = [...oddsEventIds].filter((id) => eventToMatch.has(id)).length;
+
       const oddsApplied = await this.applyOdds(allOddsItems, eventToMatch);
 
       // Notify live status changes (scores/minute) to any connected dashboard
@@ -223,7 +245,7 @@ async syncRealMatches(): Promise<{ success: boolean; count: number; message: str
       this.lastError = null;
       this.importedCount = total;
 
-      console.log(`[ExternalFeedAdapter] Synced ${total} real matches (${oddsApplied} odds updated).`);
+      console.log(`[ExternalFeedAdapter] Synced ${total} real matches (${oddsApplied} odds rows applied, ${oddsCoveredEvents}/${eventToMatch.size} events covered by odds).`);
       return {
         success: true,
         count: total,
