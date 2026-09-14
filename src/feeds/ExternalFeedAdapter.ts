@@ -49,6 +49,18 @@ function guessCategory(title: string): string {
   if (t.includes('bundesliga') || t.includes('german') || t.includes('dfb')) return 'Germany';
   if (t.includes('ligue') || t.includes('france') || t.includes('french')) return 'France';
   if (t.includes('champions') || t.includes('europa') || t.includes('uefa') || t.includes('conference')) return 'International';
+  if (t.includes('veikkausliiga') || t.includes('finland') || t.includes('finnish')) return 'Finland';
+  if (t.includes('eredivisie') || t.includes('netherlands') || t.includes('holland')) return 'Netherlands';
+  if (t.includes('liga portugal') || t.includes('ligue portugal') || t.includes('portugal') || t.includes('primeira')) return 'Portugal';
+  if (t.includes('brasileir') || t.includes('brazil')) return 'Brazil';
+  if (t.includes('super lig') || t.includes('turk')) return 'Turkey';
+  if (t.includes('superliga') || t.includes('romania') || t.includes('romanian')) return 'Romania';
+  if (t.includes('ekstraklasa') || t.includes('poland') || t.includes('polish')) return 'Poland';
+  if (t.includes('eliteserien') || t.includes('norway') || t.includes('norwegian')) return 'Norway';
+  if (t.includes('allsvenskan') || t.includes('sweden') || t.includes('swedish')) return 'Sweden';
+  if (t.includes('j1 league') || t.includes('japan') || t.includes('japanese')) return 'Japan';
+  if (t.includes('mls') || t.includes('usa') || t.includes('american')) return 'USA';
+  if (t.includes('serie b') || t.includes('scottish') || t.includes('scotland')) return 'Scotland';
   return 'International';
 }
 export class ExternalFeedAdapter implements IFeedProvider {
@@ -222,9 +234,19 @@ private async upsertEvent(ev: any): Promise<string | null> {
     const st = mapStatus(ev.status);
     if (st.status !== 'PREMATCH' && st.status !== 'LIVE') return null; // skip finished/cancelled
 
-    const leagueId = Number(ev.league_id || 0);
-    const league = leagueId ? this.leaguesMap.get(leagueId) : undefined;
-    const leagueName = String(ev.league_name || league?.name || 'League');
+    // Resolve league from flat fields (league_id / league_name) OR nested objects (league/competition)
+    const nestedLeague: any =
+      (ev.league && typeof ev.league === 'object' ? ev.league : null) ||
+      (ev.competition && typeof ev.competition === 'object' ? ev.competition : null);
+    const leagueId = Number(ev.league_id ?? nestedLeague?.id ?? 0);
+    const flatLeagueName = String(ev.league_name || ev.league?.name || ev.competition?.name || ev.tournament?.name || '').trim();
+
+    let league = leagueId ? this.leaguesMap.get(leagueId) : undefined;
+    if (!league && flatLeagueName) {
+      league = [...this.leaguesMap.values()].find((l) => l.name.toLowerCase() === flatLeagueName.toLowerCase());
+    }
+
+    const leagueName = flatLeagueName || league?.name || 'League';
     const categoryName = league?.country ? league.country : guessCategory(leagueName);
 
     // Sport: Football
