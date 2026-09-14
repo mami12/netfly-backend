@@ -72,6 +72,8 @@ export class ExternalFeedAdapter implements IFeedProvider {
   private importedCount = 0;
   private leaguesMap = new Map<number, { name: string; country: string }>();
   private lastLeaguesSync = 0;
+  private leagueProbeCount = 0;
+  private oddsProbeCount = 0;
 
   private matchEventCallbacks: ((event: MatchEvent) => void)[] = [];
   private pitchUpdateCallbacks: ((state: PitchState) => void)[] = [];
@@ -133,13 +135,16 @@ export class ExternalFeedAdapter implements IFeedProvider {
   private async ensureLeagues(): Promise<void> {
     if (Date.now() - this.lastLeaguesSync < 6 * 60 * 60 * 1000 && this.leaguesMap.size > 0) return;
     const res = await this.request('/api/v2/leagues/?limit=200');
-    if (res.status === 200 && Array.isArray(res.data)) {
+    const leagues = this.extractList(res.data);
+    if (res.status === 200 && leagues.length) {
       this.leaguesMap = new Map();
-      for (const l of res.data) {
+      for (const l of leagues) {
         this.leaguesMap.set(Number(l.id), { name: String(l.name || ''), country: String(l.country || '') });
       }
       this.lastLeaguesSync = Date.now();
       console.log(`[ExternalFeedAdapter] Loaded ${this.leaguesMap.size} leagues.`);
+    } else {
+      console.warn(`[ExternalFeedAdapter] Leagues fetch status=${res.status}, items=${leagues.length}; sample=${res.raw.substring(0, 160)}`);
     }
   }
 async syncRealMatches(): Promise<{ success: boolean; count: number; message: string }> {
@@ -190,11 +195,19 @@ async syncRealMatches(): Promise<{ success: boolean; count: number; message: str
       }
 
       const allOddsItems = [
-        ...(Array.isArray(odds1x2.data) ? odds1x2.data : []),
-        ...(Array.isArray(oddsOU.data) ? oddsOU.data : []),
-        ...(Array.isArray(oddsBTTS.data) ? oddsBTTS.data : []),
-        ...(Array.isArray(oddsDC.data) ? oddsDC.data : [])
+        ...this.extractList(odds1x2.data),
+        ...this.extractList(oddsOU.data),
+        ...this.extractList(oddsBTTS.data),
+        ...this.extractList(oddsDC.data)
       ];
+      if (allOddsItems.length === 0) {
+        console.warn('[ExternalFeedAdapter] No odds items parsed. sample responses =>', {
+          '1x2': odds1x2.raw.substring(0, 220),
+        OU25: oddsOU.raw.substring(0, 140)
+        });
+      } else {
+        console.log(`[ExternalFeedAdapter] Odds items parsed: ${allOddsItems.length}`);
+      }
       const oddsApplied = await this.applyOdds(allOddsItems, eventToMatch);
 
       // Notify live status changes (scores/minute) to any connected dashboard
@@ -248,6 +261,11 @@ private async upsertEvent(ev: any): Promise<string | null> {
 
     const leagueName = flatLeagueName || league?.name || 'League';
     const categoryName = league?.country ? league.country : guessCategory(leagueName);
+
+    if (this.leagueProbeCount < 3) {
+      this.leagueProbeCount++;
+      console.log(`[ExternalFeedAdapter] league probe id=${eventId} leagueId=${leagueId} name='${flatLeagueName}' => '${leagueName}' / '${categoryName}'`);
+    }
 
     // Sport: Football
     let dbSport = await prisma.sport.findUnique({ where: { slug: 'football' } });
@@ -304,7 +322,13 @@ private async applyOdds(items: any[], eventToMatch: Map<number, string>): Promis
     for (const item of items || []) {
       const eventId = Number(item.event_id ?? item.event);
       const matchId = eventToMatch.get(eventId);
-      if (!matchId) continue;
+      if (!matchId) {
+        if (this.oddsProbeCount < 3) {
+          this.oddsProbeCount++;
+          console.log(`[ExternalFeedAdapter] odds item skipped event_id=${eventId} item=${JSON.stringify(item).substring(0, 180)}`);
+        }
+        continue;
+      }
 
       const marketCode = String(item.market || '').toLowerCase();
       const marketType =
