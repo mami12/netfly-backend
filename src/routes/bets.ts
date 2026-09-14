@@ -16,11 +16,26 @@ router.post('/place', auth, async (req: AuthRequest, res) => {
   const systemType = req.body.systemType || null;
   const userId = req.user!.userId;
 
-  if (stake < 1) return res.status(400).json({ error: 'Minimum stake is 1 Lek' });
+  if (stake < 100) {
+    return res.status(400).json({ 
+      error: 'Shuma minimale për të vendosur një bast është 100 Lek', 
+      message: 'Shuma minimale për të vendosur një bast është 100 Lek' 
+    });
+  }
 
   const user = await prisma.user.findUnique({ where: { id: userId } });
-  if (!user || user.status !== 'ACTIVE') return res.status(403).json({ error: 'User not active' });
-  if (user.balance < stake) return res.status(400).json({ error: 'Insufficient balance' });
+  if (!user || user.status !== 'ACTIVE') {
+    return res.status(403).json({ 
+      error: 'Llogaria juaj nuk është aktive ose është e pezulluar', 
+      message: 'Llogaria juaj nuk është aktive ose është e pezulluar' 
+    });
+  }
+  if (user.balance < stake) {
+    return res.status(400).json({ 
+      error: `Bilanci juaj nuk mjafton për këtë bast. Ju keni ${user.balance.toLocaleString()} Lek në llogari.`, 
+      message: `Bilanci juaj nuk mjafton për këtë bast. Ju keni ${user.balance.toLocaleString()} Lek në llogari.` 
+    });
+  }
 
   let totalOdds = 1;
   const linesData: any[] = [];
@@ -28,11 +43,17 @@ router.post('/place', auth, async (req: AuthRequest, res) => {
   for (const sel of selections) {
     const outcome = await prisma.outcome.findUnique({ where: { id: sel.outcomeId }, include: { market: { include: { match: true } } } });
     if (!outcome || outcome.status !== 'ACTIVE' || outcome.market.status !== 'ACTIVE' || outcome.market.match.isSuspended) {
-      return res.status(400).json({ error: 'Selection unavailable' });
+      return res.status(400).json({ 
+        error: `Ndeshja ose kuota për "${sel.matchName || 'zgjedhjen'}" nuk është më e disponueshme`, 
+        message: `Ndeshja ose kuota për "${sel.matchName || 'zgjedhjen'}" nuk është më e disponueshme` 
+      });
     }
     const clientOdds = sel.oddsAtPlacement || sel.odds || outcome.odds;
     if (Math.abs(outcome.odds - clientOdds) / clientOdds > 0.1) {
-      return res.status(400).json({ error: 'Odds changed significantly' });
+      return res.status(400).json({ 
+        error: 'Koeficientët kanë ndryshuar gjatë vendosjes. Ju lutem pranoni koeficientët e rinj.', 
+        message: 'Koeficientët kanë ndryshuar gjatë vendosjes. Ju lutem pranoni koeficientët e rinj.' 
+      });
     }
 
     if (ticketType === 'COMBO') totalOdds *= outcome.odds;
@@ -91,7 +112,12 @@ router.post('/book', async (req, res) => {
   const ticketType = req.body.ticketType || req.body.type || (selections.length > 1 ? 'COMBO' : 'SINGLE');
   const systemType = req.body.systemType || null;
   
-  if (stake < 1) return res.status(400).json({ error: 'Minimum stake is 1 Lek' });
+  if (stake < 100) {
+    return res.status(400).json({ 
+      error: 'Shuma minimale për të prenotuar një skedinë është 100 Lek', 
+      message: 'Shuma minimale për të prenotuar një skedinë është 100 Lek' 
+    });
+  }
   let totalOdds = 1;
   const linesData: any[] = [];
 
